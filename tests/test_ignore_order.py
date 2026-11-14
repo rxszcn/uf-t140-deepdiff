@@ -1279,6 +1279,328 @@ class TestCompareFuncIgnoreOrder:
         assert old_invalid_diff != actual_diff
         assert new_expected_diff == actual_diff
 
+    # ------------------------------------------------------------------
+    # Matrix: ignore_order x reconciliation shape, using the documented
+    # strict three-argument callback signature (x, y, level).
+    # These pin the ignore-order alignment path
+    # (_precalculate_distance_by_custom_compare_func) to the same calling
+    # contract as _get_matching_pairs. Every callback below requires the
+    # `level` argument (no default), so a two-argument call raises
+    # TypeError instead of silently passing.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strict_three_arg_compare_func(x, y, level):
+        """Business-key reconcile callback that REQUIRES the level argument."""
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            raise CannotCompare()
+        return x['id'] == y['id']
+
+    # (ignore_order, shape, t1, t2, expected)
+    # shape is one of: 'pure_modification', 'real_add_remove', 'add_only', 'remove_only'
+    RECONCILE_MATRIX = [
+        (
+            False, 'pure_modification',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 2, 'name': 'beta', 'qty': 2}, {'id': 1, 'name': 'alpha', 'qty': 99}],
+            {'values_changed': {"root[1]['qty']": {'new_value': 99, 'old_value': 1}}},
+        ),
+        (
+            True, 'pure_modification',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 2, 'name': 'beta', 'qty': 2}, {'id': 1, 'name': 'alpha', 'qty': 99}],
+            {'values_changed': {"root[0]['qty']": {'new_value': 99, 'old_value': 1}}},
+        ),
+        (
+            False, 'real_add_remove',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 2, 'name': 'beta', 'qty': 2}, {'id': 3, 'name': 'gamma', 'qty': 3}],
+            {
+                'iterable_item_added': {'root[1]': {'id': 3, 'name': 'gamma', 'qty': 3}},
+                'iterable_item_removed': {'root[0]': {'id': 1, 'name': 'alpha', 'qty': 1}},
+            },
+        ),
+        (
+            True, 'real_add_remove',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 2, 'name': 'beta', 'qty': 2}, {'id': 3, 'name': 'gamma', 'qty': 3}],
+            {
+                'iterable_item_added': {'root[1]': {'id': 3, 'name': 'gamma', 'qty': 3}},
+                'iterable_item_removed': {'root[0]': {'id': 1, 'name': 'alpha', 'qty': 1}},
+            },
+        ),
+        (
+            False, 'add_only',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}],
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            {'iterable_item_added': {'root[1]': {'id': 2, 'name': 'beta', 'qty': 2}}},
+        ),
+        (
+            True, 'add_only',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}],
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            {'iterable_item_added': {'root[1]': {'id': 2, 'name': 'beta', 'qty': 2}}},
+        ),
+        (
+            False, 'remove_only',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 1, 'name': 'alpha', 'qty': 1}],
+            {'iterable_item_removed': {'root[1]': {'id': 2, 'name': 'beta', 'qty': 2}}},
+        ),
+        (
+            True, 'remove_only',
+            [{'id': 1, 'name': 'alpha', 'qty': 1}, {'id': 2, 'name': 'beta', 'qty': 2}],
+            [{'id': 1, 'name': 'alpha', 'qty': 1}],
+            {'iterable_item_removed': {'root[1]': {'id': 2, 'name': 'beta', 'qty': 2}}},
+        ),
+    ]
+
+    @pytest.mark.parametrize('ignore_order, shape, t1, t2, expected', RECONCILE_MATRIX)
+    def test_strict_three_arg_compare_func_reconcile_matrix(self, ignore_order, shape, t1, t2, expected):
+        """Pure-modification and real add/remove reconcile shapes both work with (x, y, level)."""
+        actual = DeepDiff(
+            t1, t2,
+            ignore_order=ignore_order,
+            iterable_compare_func=self._strict_three_arg_compare_func,
+        )
+        assert expected == actual
+
+    @pytest.mark.parametrize('ignore_order, shape, t1, t2, expected', RECONCILE_MATRIX)
+    def test_matrix_matches_no_callback_where_behaviour_is_unchanged(
+            self, ignore_order, shape, t1, t2, expected):
+        """Where a callback cannot help, results must match the no-callback baseline.
+
+        When the two sides only add or only remove items, the hashes already
+        decide the outcome, so a callback must not perturb it.
+        """
+        without_callback = DeepDiff(t1, t2, ignore_order=ignore_order)
+        with_callback = DeepDiff(
+            t1, t2,
+            ignore_order=ignore_order,
+            iterable_compare_func=self._strict_three_arg_compare_func,
+        )
+        if shape in ('add_only', 'remove_only'):
+            assert without_callback == with_callback == expected
+
+    def test_strict_three_arg_compare_func_callback_receives_the_alignment_level(self):
+        """The third argument is the container DiffLevel being aligned, not None."""
+        seen = []
+
+        def compare_func(x, y, level):
+            seen.append(level.path())
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            return x['id'] == y['id']
+
+        t1 = {'orders': [{'id': 1, 'v': 'x'}, {'id': 2, 'v': 'y'}]}
+        t2 = {'orders': [{'id': 2, 'v': 'Y'}, {'id': 1, 'v': 'x'}]}
+        result = DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_func)
+
+        assert {'values_changed': {"root['orders'][1]['v']": {'new_value': 'Y', 'old_value': 'y'}}} == result
+        assert seen, "The compare func must be called on the ignore_order pairing path."
+        assert all("root['orders']" == path for path in seen)
+
+    def test_strict_three_arg_compare_func_direction_is_x_from_t1_and_y_from_t2(self):
+        """Ignore-order alignment calls the callback as (t1_item, t2_item, level), like _get_matching_pairs."""
+        t1 = [{'id': 1, 'side': 't1', 'v': [1, 2, 3, 4, 5]}]
+        t2 = [{'id': 1, 'side': 't2', 'v': [9, 8, 7, 6, 5]}]
+
+        def compare_func_t1_first(x, y, level):
+            # Only accepts the documented orientation: x is from t1, y is from t2.
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            return x['side'] == 't1' and y['side'] == 't2'
+
+        def compare_func_t2_first(x, y, level):
+            # The inverted orientation. If the alignment path passed the
+            # arguments backwards this one would succeed instead.
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            return x['side'] == 't2' and y['side'] == 't1'
+
+        aligned = DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_func_t1_first)
+        inverted = DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_func_t2_first)
+
+        # A successful callback pair yields a per-field report...
+        assert {
+            'values_changed': {
+                "root[0]['side']": {'new_value': 't2', 'old_value': 't1'},
+                "root[0]['v'][0]": {'new_value': 9, 'old_value': 1},
+                "root[0]['v'][1]": {'new_value': 8, 'old_value': 2},
+                "root[0]['v'][2]": {'new_value': 7, 'old_value': 3},
+                "root[0]['v'][3]": {'new_value': 6, 'old_value': 4},
+            },
+        } == aligned
+        # ...while the inverted callback does not pair, and the whole item is
+        # reported as one change instead.
+        assert {
+            'values_changed': {
+                'root[0]': {
+                    'new_value': {'id': 1, 'side': 't2', 'v': [9, 8, 7, 6, 5]},
+                    'old_value': {'id': 1, 'side': 't1', 'v': [1, 2, 3, 4, 5]},
+                },
+            },
+        } == inverted
+        assert aligned != inverted, "Callback argument order must be observable."
+
+    def test_ignore_order_doc_example_runs_verbatim(self):
+        """Reproduce the ignore_order.rst example exactly, including the three-argument callback."""
+        t1 = [
+            {'id': 1, 'value': [1]},
+            {'id': 2, 'value': [7, 8, 1]},
+            {'id': 3, 'value': [7, 8]},
+        ]
+        t2 = [
+            {'id': 2, 'value': [7, 8]},
+            {'id': 3, 'value': [7, 8, 1]},
+            {'id': 1, 'value': [1]},
+        ]
+
+        assert {
+            'values_changed': {
+                "root[2]['id']": {'new_value': 2, 'old_value': 3},
+                "root[1]['id']": {'new_value': 3, 'old_value': 2},
+            },
+        } == DeepDiff(t1, t2, ignore_order=True)
+
+        def compare_func(x, y, level=None):
+            try:
+                return x['id'] == y['id']
+            except Exception:
+                raise CannotCompare() from None
+
+        assert {
+            'iterable_item_added': {"root[2]['value'][2]": 1},
+            'iterable_item_removed': {"root[1]['value'][2]": 1},
+        } == DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_func)
+
+    def test_ignore_order_doc_example_runs_verbatim_with_mandatory_level(self):
+        """Same documented reconcile scenario, but the callback REQUIRES the level argument."""
+        t1 = [
+            {'id': 1, 'value': [1]},
+            {'id': 2, 'value': [7, 8, 1]},
+            {'id': 3, 'value': [7, 8]},
+        ]
+        t2 = [
+            {'id': 2, 'value': [7, 8]},
+            {'id': 3, 'value': [7, 8, 1]},
+            {'id': 1, 'value': [1]},
+        ]
+
+        def compare_func(x, y, level):
+            try:
+                return x['id'] == y['id']
+            except Exception:
+                raise CannotCompare() from None
+
+        assert {
+            'iterable_item_added': {"root[2]['value'][2]": 1},
+            'iterable_item_removed': {"root[1]['value'][2]": 1},
+        } == DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_func)
+
+    def test_strict_three_arg_compare_func_distance_drives_pairing(self):
+        """The distance derived from the callback decides pairing."""
+        t1 = [{'id': 1, 'v': 'a', 'w': 'same'}]
+        t2 = [{'id': 2, 'v': 'a', 'w': 'same'}]
+
+        def compare_true(x, y, level):
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            return True
+
+        def compare_false(x, y, level):
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            return False
+
+        paired = DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_true)
+        unpaired = DeepDiff(t1, t2, ignore_order=True, iterable_compare_func=compare_false)
+        baseline = DeepDiff(t1, t2, ignore_order=True)
+
+        # A matching callback pair gets a tiny distance, so the items pair and
+        # the difference is reported field-by-field.
+        assert {'values_changed': {"root[0]['id']": {'new_value': 2, 'old_value': 1}}} == paired
+        # A non-matching callback yields distance 1 (>= cutoff), so the two items
+        # are *not* paired and the whole item is reported as changed instead.
+        assert {
+            'values_changed': {
+                'root[0]': {
+                    'new_value': {'id': 2, 'v': 'a', 'w': 'same'},
+                    'old_value': {'id': 1, 'v': 'a', 'w': 'same'},
+                },
+            },
+        } == unpaired
+        assert unpaired != baseline, "The callback-derived distance must change pairing."
+
+    def test_strict_three_arg_compare_func_match_wins_over_rough_distance(self):
+        """A callback match assigns a tiny distance, so it wins over a closer-looking but rejected item."""
+        t1 = [
+            {'key': 'A', 'v': 1, 'w': 1, 'q': 2},   # looks close to t2 by content
+            {'key': 'A', 'v': 2},                   # looks far, but the callback matches it
+        ]
+        t2 = [{'key': 'A', 'v': 1, 'w': 1, 'q': 9}]
+
+        def compare_second_only(x, y, level):
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            if x['v'] == 2:
+                return True
+            # Refuse the content-similar candidate so only the callback
+            # distance is left to decide.
+            raise CannotCompare()
+
+        with_callback = DeepDiff(
+            t1, t2,
+            ignore_order=True,
+            iterable_compare_func=compare_second_only,
+            cutoff_intersection_for_pairs=1,
+        )
+        without_callback = DeepDiff(t1, t2, ignore_order=True, cutoff_intersection_for_pairs=1)
+
+        assert {
+            'dictionary_item_added': ["root[1]['w']", "root[1]['q']"],
+            'iterable_item_removed': {'root[0]': {'key': 'A', 'q': 2, 'v': 1, 'w': 1}},
+            'values_changed': {"root[1]['v']": {'new_value': 1, 'old_value': 2}},
+        } == with_callback
+        assert {
+            'iterable_item_removed': {'root[1]': {'key': 'A', 'v': 2}},
+            'values_changed': {"root[0]['q']": {'new_value': 9, 'old_value': 2}},
+        } == without_callback
+        assert with_callback != without_callback
+
+    def test_strict_three_arg_compare_func_same_key_min_distance_wins(self):
+        """With several candidates under the same business key, the smallest callback distance wins."""
+        t1 = [
+            {'id': 'A', 'v': 1, 'w': 1, 'q': 2},   # content-close, but the callback rejects it
+            {'id': 'A', 'v': 2},                   # content-far, but the callback accepts it
+        ]
+        t2 = [{'id': 'A', 'v': 1, 'w': 1, 'q': 9}]
+
+        def compare_by_key_prefer_second(x, y, level):
+            if not isinstance(x, dict) or not isinstance(y, dict):
+                raise CannotCompare()
+            # Same business key throughout; the decision is distance based.
+            if x['id'] != y['id']:
+                return False
+            return x['v'] != 1
+
+        result = DeepDiff(
+            t1, t2,
+            ignore_order=True,
+            iterable_compare_func=compare_by_key_prefer_second,
+            cutoff_intersection_for_pairs=1,
+        )
+        baseline = DeepDiff(t1, t2, ignore_order=True, cutoff_intersection_for_pairs=1)
+
+        # The accepted candidate gets distance ~1e-06 and is paired, so the
+        # difference is reported against it (root[1]) and root[0] is removed.
+        assert result == {
+            'dictionary_item_added': ["root[1]['w']", "root[1]['q']"],
+            'iterable_item_removed': {'root[0]': {'id': 'A', 'q': 2, 'v': 1, 'w': 1}},
+            'values_changed': {"root[1]['v']": {'new_value': 1, 'old_value': 2}},
+        }
+        assert baseline != result
+
 
 class TestDynamicIgnoreOrder:
     def test_ignore_order_func(self):

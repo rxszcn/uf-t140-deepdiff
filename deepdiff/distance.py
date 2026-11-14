@@ -105,7 +105,8 @@ class DistanceMixin:
         )
 
     def _precalculate_distance_by_custom_compare_func(
-            self: "DistanceProtocol", hashes_added, hashes_removed, t1_hashtable, t2_hashtable, _original_type):
+            self: "DistanceProtocol", hashes_added, hashes_removed, t1_hashtable, t2_hashtable, _original_type,
+            level=None):
         pre_calced_distances = dict_()
         if self.iterable_compare_func is None:
             return pre_calced_distances
@@ -113,7 +114,13 @@ class DistanceMixin:
         for added_hash in hashes_added:
             for removed_hash in hashes_removed:
                 try:
-                    is_close_distance = compare_func(t2_hashtable[added_hash].item, t1_hashtable[removed_hash].item)
+                    # The documented contract is a three-argument callback: (x, y, level).
+                    # Keep x from t1 and y from t2 so this matches _get_matching_pairs.
+                    is_close_distance = compare_func(
+                        t1_hashtable[removed_hash].item,
+                        t2_hashtable[added_hash].item,
+                        level,
+                    )
                 except CannotCompare:
                     pass
                 else:

@@ -1451,7 +1451,7 @@ class DeepDiff(ResultDict, SerializationMixin, DistanceMixin, DeepDiffProtocol, 
             self._stats[MAX_DIFF_LIMIT_REACHED] = True
 
     def _get_most_in_common_pairs_in_iterables(
-            self, hashes_added, hashes_removed, t1_hashtable, t2_hashtable, parents_ids, _original_type):
+            self, hashes_added, hashes_removed, t1_hashtable, t2_hashtable, parents_ids, _original_type, level=None):
         """
         Get the closest pairs between items that are removed and items that are added.
 
@@ -1502,7 +1502,7 @@ class DeepDiff(ResultDict, SerializationMixin, DistanceMixin, DeepDiffProtocol, 
                 and self.iterable_compare_func \
                 and len(hashes_added) > 0 and len(hashes_removed) > 0:
             pre_calced_distances = self._precalculate_distance_by_custom_compare_func(
-                hashes_added, hashes_removed, t1_hashtable, t2_hashtable, _original_type)
+                hashes_added, hashes_removed, t1_hashtable, t2_hashtable, _original_type, level)
 
         # Optionally precompute non-cached distances in worker processes.
         # Returns a dict keyed by (added_hash, removed_hash). Pair selection
@@ -1727,7 +1727,7 @@ class DeepDiff(ResultDict, SerializationMixin, DistanceMixin, DeepDiffProtocol, 
         if self._stats[PASSES_COUNT] < self.max_passes and get_pairs:
             self._stats[PASSES_COUNT] += 1
             pairs = self._get_most_in_common_pairs_in_iterables(
-                hashes_added, hashes_removed, t1_hashtable, t2_hashtable, parents_ids, _original_type)
+                hashes_added, hashes_removed, t1_hashtable, t2_hashtable, parents_ids, _original_type, level)
         elif get_pairs:
             if not self._stats[MAX_PASS_LIMIT_REACHED]:
                 self._stats[MAX_PASS_LIMIT_REACHED] = True
